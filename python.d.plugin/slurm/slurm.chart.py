@@ -1,12 +1,14 @@
 import subprocess
 from bases.FrameworkServices.SimpleService import SimpleService
 import re
+from pprint import pprint
 
 ORDER = ['sdiag_server',
         'sdiag_jobs',
         'sdiag_main_sched_stats',
         'sdiag_backfilling_stats',
-        'sdiag_rpc_call_statistics']
+        'sdiag_user_rpc_calls_count',
+        'sdiag_rpc_calls_count']
 
 CHARTS = {
     'sdiag_server': {
@@ -80,6 +82,26 @@ CHARTS = {
             ['backfill_last_queue_length', 'Last queue length', 'absolute'],
             ['backfill_last_table_size', 'Last table size', 'absolute']
         ]
+    },
+
+    'sdiag_user_rpc_calls_count': {
+        'options': [None,
+                'SDIAG User RPC Calls Count',
+                'total',
+                'sdiag_user_rpc_calls_count',
+                'sdiag_user_rpc_calls_count',
+                'line'],
+        'lines': []
+    },
+
+    'sdiag_rpc_calls_count': {
+        'options': [None,
+                'SDIAG RPC Calls Count',
+                'Average Time (ms)',
+                'sdiag_rpc_calls_count',
+                'sdiag_rpc_calls_count',
+                'line'],
+        'lines': []
     }
 }
 
@@ -95,11 +117,13 @@ class Service(SimpleService):
 
 
     def get_data(self):
-        data = self.get_sdiag()
+        data = self.get_slurm_data()
         return data
 
-    def get_sdiag(self):
-        sdiag_data = dict()
+    def get_slurm_data(self):
+        data = dict()
+
+        ## Start SDIAG Collection
         sdiag_raw = subprocess.check_output(['sdiag'], universal_newlines=True)
         prepend = ""
         for line in sdiag_raw.splitlines():
@@ -118,12 +142,37 @@ class Service(SimpleService):
                 field = re.sub("\(", "", field)
                 field = re.sub("\)", "", field)
                 field = re.sub(" ", "_", field)
-                sdiag_data[field] = match.group("value")
+                data[field] = match.group("value")
                 continue
             match = re.match('^(?P<field>[\S]+)\s*\(\s*(?P<value>[\d]+)\) count:(?P<count>[\d]+)\s*ave_time:(?P<ave_time>[\d]+)\s*total_time:(?P<total_time>[\d]+)$', line)
             if match:
                 field = "{0}{1}".format(prepend, match.group("field").lower())
-                sdiag_data[field] = {"count": match.group("count"),
-                                        "ave_time": match.group("ave_time"),
-                                        "total_time": match.group("total_time")}
-        return sdiag_data
+                # Collect User RPC Calls (count)
+                if prepend == "user_rpc_":
+                    data[field] = match.group("count") ## don't need other fields yet
+                    ## If this is a new user showing up we need to add a new line for them
+                    if field not in self.charts['sdiag_user_rpc_calls_count']:
+                        self.charts['sdiag_user_rpc_calls_count'].add_dimension([field, match.group("field"),'absolute'])
+                # Collect RPC Calls (avg_time)
+                if prepend == "rpc_":
+                    data[field] = match.group("ave_time")
+                    if field not in self.charts['sdiag_rpc_calls_count']:
+                        self.charts['sdiag_rpc_calls_count'].add_dimension([field, match.group("field"),'absolute'])   
+
+        ##remove any user lines that don't exist any more (resets every night)
+        for line in self.charts['sdiag_user_rpc_calls_count'].dimensions:
+            if line.id not in data:
+                self.charts['sdiag_user_rpc_calls_count'].del_dimension(line)
+
+        ##Start Cluster Information Collection
+        clust_raw = subprocess.check_output(['sinfo', '-Nh', '-o', '"%n,%e,%m,%O,,%X,%Y,%t"'], universal_newlines=True)
+        states = dict()
+        mem, cores = int()
+        cores = int()
+        for line in clust_raw.splitlines():
+            hostname,free_mem,total_mem,sockets,cores,state = clust_raw.split(",")
+            if state not in states:
+                states[state] = 0
+            states[state] = states[state] + 1
+
+        return data
